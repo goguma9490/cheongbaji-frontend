@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Sparkles,
   MapPin,
@@ -23,6 +23,7 @@ import {
   Palette,
   Sparkle,
 } from 'lucide-react';
+import { supabase } from '../lib/supabaseClient';
 
 /* ============================================================
  * 1. 타입 정의
@@ -97,7 +98,9 @@ function passesHardFilter(user: RecommendationUser, policy: Policy): boolean {
   const incomeOk = policy.max_income == null || user.income <= policy.max_income;
 
   const employmentOk =
-    policy.target_employment == null || policy.target_employment === user.employment_status;
+    policy.target_employment == null ||
+    policy.target_employment === '전체' ||
+    policy.target_employment === user.employment_status;
 
   return ageOk && regionOk && incomeOk && employmentOk;
 }
@@ -324,6 +327,49 @@ function buildDummyPolicies(): Policy[] {
   ];
 }
 
+/* ============================================================
+ * Supabase 실제 데이터 로딩
+ * ------------------------------------------------------------
+ * policies / policy_documents 테이블에서 실제 수집된 정책을 읽어와
+ * Policy 타입으로 매핑한다. 실패하거나 0건이면 더미 데이터를 그대로 쓴다.
+ * ============================================================ */
+
+async function fetchPoliciesFromSupabase(): Promise<Policy[]> {
+  const { data: policyRows, error: policyError } = await supabase
+    .from('policies')
+    .select('*');
+  if (policyError) throw policyError;
+
+  const { data: docRows, error: docError } = await supabase
+    .from('policy_documents')
+    .select('*');
+  if (docError) throw docError;
+
+  const docsByPolicy: Record<string, PolicyDocument[]> = {};
+  for (const d of docRows ?? []) {
+    const list = docsByPolicy[d.policy_id] ?? (docsByPolicy[d.policy_id] = []);
+    list.push({ document_name: d.document_name, is_required: d.is_essential ?? true });
+  }
+
+  return (policyRows ?? []).map((row: any) => ({
+    policy_id: row.policy_id,
+    title: row.title,
+    category: row.category ?? '기타',
+    organization: row.institution ?? '기관 정보 없음',
+    description: row.summary ?? '',
+    support_content: row.benefit_desc ?? row.summary ?? '',
+    min_age: row.min_age,
+    max_age: row.max_age,
+    target_region: row.target_region,
+    max_income: row.max_income,
+    target_employment: row.target_employment,
+    support_amount: row.max_benefit_amount,
+    deadline: row.closing_date,
+    source_url: row.apply_url,
+    documents: docsByPolicy[row.policy_id] ?? [],
+  }));
+}
+
 const DUMMY_POLICIES = buildDummyPolicies();
 
 const REGION_OPTIONS = ['서울', '인천', '경기', '전국'];
@@ -389,7 +435,29 @@ export default function CheongbajiPage() {
 
   // 정책 데이터 (Step 1 더미 데이터를 기본 state로 사용, 추후 Supabase 연동 시
   // setPolicies(실제로 조회한 배열) 형태로 교체하면 됩니다)
-  const [policies] = useState<Policy[]>(DUMMY_POLICIES);
+  const [policies, setPolicies] = useState<Policy[]>(DUMMY_POLICIES);
+  const [dataSource, setDataSource] = useState<'loading' | 'supabase' | 'dummy'>('loading');
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPoliciesFromSupabase()
+      .then((rows) => {
+        if (cancelled) return;
+        if (rows.length > 0) {
+          setPolicies(rows);
+          setDataSource('supabase');
+        } else {
+          setDataSource('dummy');
+        }
+      })
+      .catch((err) => {
+        console.error('Supabase 정책 데이터를 불러오지 못했습니다:', err);
+        if (!cancelled) setDataSource('dummy');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // 입력 중인 프로필 (컨트롤된 폼 state)
   const [draftProfile, setDraftProfile] = useState<RecommendationUser>({
@@ -730,6 +798,11 @@ export default function CheongbajiPage() {
           {/* ⚠️ min-w-0 추가: grid의 1fr 칸은 기본 min-width:auto라서, 안의 긴(끊김 없는) 텍스트가
               칸 폭을 강제로 늘려 레이아웃 전체가 깨지는 문제가 있었음 (상세보기 버튼이 화면 밖으로 밀려남) */}
           <div className="min-w-0">
+            <p className="mb-1 text-xs font-medium text-indigo-500">
+              {dataSource === 'loading' && '실제 정책 데이터를 불러오는 중...'}
+              {dataSource === 'supabase' && '실제 Supabase 데이터 기준'}
+              {dataSource === 'dummy' && '예시(더미) 데이터 기준'}
+            </p>
             <p className="mb-3 text-sm text-slate-500">
               총 <span className="font-semibold text-slate-900">{displayedResults.length}개</span>의 맞춤 정책을 찾았어요.
             </p>
