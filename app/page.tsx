@@ -9,7 +9,6 @@ import {
   Heart,
   Search,
   SlidersHorizontal,
-  Filter,
   Clock,
   Award,
   X,
@@ -59,7 +58,7 @@ interface Policy {
   // 1차 Hard Filtering 필드
   min_age: number | null;
   max_age: number | null;
-  target_region: string | null; // '전국' 또는 특정 지역명
+  target_region: string | null; // 서울/인천/경기 등 특정 지역명 (서비스가 수도권으로 한정되어 '전국'은 쓰지 않음)
   max_income: number | null; // 월 소득 상한 (원)
   target_employment: string | null; // null이면 고용상태 무관
 
@@ -90,10 +89,9 @@ function passesHardFilter(user: RecommendationUser, policy: Policy): boolean {
     (policy.min_age == null || user.age >= policy.min_age) &&
     (policy.max_age == null || user.age <= policy.max_age);
 
-  const regionOk =
-    policy.target_region == null ||
-    policy.target_region === '전국' ||
-    policy.target_region === user.region;
+  // 서비스가 서울/인천/경기로 한정되므로 '전국' 분류는 더 이상 사용하지 않는다.
+  // (target_region이 null인 데이터는 지역 정보 미기재로 간주해 통과시킨다)
+  const regionOk = policy.target_region == null || policy.target_region === user.region;
 
   const incomeOk = policy.max_income == null || user.income <= policy.max_income;
 
@@ -234,7 +232,7 @@ function buildDummyPolicies(): Policy[] {
       support_content: '2년간 본인 400만원 + 기업·정부 지원금 적립, 만기 시 최대 1,600만원 수령',
       min_age: 19,
       max_age: 34,
-      target_region: '전국',
+      target_region: '경기',
       max_income: null,
       target_employment: '재직자',
       support_amount: 16_000_000,
@@ -254,7 +252,7 @@ function buildDummyPolicies(): Policy[] {
       support_content: '월 50만원씩 최대 6개월(총 300만원) 지원',
       min_age: 19,
       max_age: 34,
-      target_region: '전국',
+      target_region: '서울',
       max_income: 2_500_000,
       target_employment: '미취업자',
       support_amount: 3_000_000,
@@ -313,7 +311,7 @@ function buildDummyPolicies(): Policy[] {
       support_content: '교육비 전액 무료, 수료 시 취업 연계 지원',
       min_age: 19,
       max_age: 29,
-      target_region: '전국',
+      target_region: '인천',
       max_income: null,
       target_employment: '미취업자',
       support_amount: null,
@@ -333,6 +331,38 @@ function buildDummyPolicies(): Policy[] {
  * policies / policy_documents 테이블에서 실제 수집된 정책을 읽어와
  * Policy 타입으로 매핑한다. 실패하거나 0건이면 더미 데이터를 그대로 쓴다.
  * ============================================================ */
+
+/* ============================================================
+ * 카테고리(관심분야) 정규화
+ * ------------------------------------------------------------
+ * 수집 파이프라인 중 온통청년 API 쪽은 API 자체의 대분류명(lclsfNm 등)을
+ * category로 그대로 저장하는데, 이 값이 앱이 쓰는 5개 관심분야(일자리/주거/
+ * 금융/교육/문화)와 글자 그대로 일치하지 않으면("복지문화", "참여권리" 등)
+ * 관심분야 필터·적합도 매칭에서 해당 정책이 통째로 빠져버린다.
+ * DB 값이 이미 5개 카테고리 중 하나와 정확히 일치하면 그대로 쓰고,
+ * 그렇지 않으면 제목/설명 텍스트의 키워드로 다시 분류한다.
+ * ============================================================ */
+const _CATEGORY_KEYWORDS: Array<[string, string[]]> = [
+  ['주거', ['주택', '전세', '월세', '임차', '보증금', '입주', '주거', '이사']],
+  ['일자리', ['취업', '채용', '구직', '일자리', '창업', '인턴', '고용']],
+  ['교육', ['교육', '학비', '장학금', '수강', '자격증', '학자금', '강좌']],
+  ['금융', ['대출', '이자', '적금', '저축', '보험', '환급', '금융']],
+  ['문화', ['문화', '공연', '전시', '여행', '축제', '체육', '예술']],
+];
+
+function inferCategoryFromText(text: string): string | null {
+  if (!text) return null;
+  for (const [category, keywords] of _CATEGORY_KEYWORDS) {
+    if (keywords.some((kw) => text.includes(kw))) return category;
+  }
+  return null;
+}
+
+function normalizeCategory(rawCategory: string | null | undefined, ...textParts: Array<string | null | undefined>): string {
+  if (rawCategory && CATEGORY_OPTIONS.includes(rawCategory)) return rawCategory;
+  const inferred = inferCategoryFromText(textParts.filter(Boolean).join(' '));
+  return inferred ?? rawCategory ?? '기타';
+}
 
 async function fetchPoliciesFromSupabase(): Promise<Policy[]> {
   const { data: policyRows, error: policyError } = await supabase
@@ -354,7 +384,7 @@ async function fetchPoliciesFromSupabase(): Promise<Policy[]> {
   return (policyRows ?? []).map((row: any) => ({
     policy_id: row.policy_id,
     title: row.title,
-    category: row.category ?? '기타',
+    category: normalizeCategory(row.category, row.title, row.summary, row.benefit_desc),
     organization: row.institution ?? '기관 정보 없음',
     description: row.summary ?? '',
     support_content: row.benefit_desc ?? row.summary ?? '',
@@ -372,7 +402,7 @@ async function fetchPoliciesFromSupabase(): Promise<Policy[]> {
 
 const DUMMY_POLICIES = buildDummyPolicies();
 
-const REGION_OPTIONS = ['서울', '인천', '경기', '전국'];
+const REGION_OPTIONS = ['서울', '인천', '경기'];
 const EMPLOYMENT_OPTIONS = ['미취업자', '재직자', '자영업자', '학생'];
 const CATEGORY_OPTIONS = ['일자리', '주거', '금융', '교육', '문화'];
 
@@ -417,7 +447,7 @@ function getEligibilityChips(policy: Policy): string[] {
     chips.push('연령 제한 없음');
   }
 
-  chips.push(policy.target_region ?? '전국');
+  chips.push(policy.target_region ?? '지역 무관');
   chips.push(formatIncomeCondition(policy.max_income));
   chips.push(policy.target_employment ?? '고용상태 무관');
 
@@ -476,7 +506,6 @@ export default function CheongbajiPage() {
   const [isSearching, setIsSearching] = useState(false);
 
   // 결과 대시보드 상태
-  const [categoryFilter, setCategoryFilter] = useState<Set<string>>(new Set());
   const [sortOption, setSortOption] = useState<SortOption>('score');
 
   // 상세 모달 상태
@@ -488,10 +517,12 @@ export default function CheongbajiPage() {
     [activeProfile, policies, today]
   );
 
+  // 결과 목록에 별도의 "관심 분야 필터"를 두지 않고, 프로필에서 고른 관심 분야를
+  // 그대로 적용한다 (관심 분야를 하나도 고르지 않았다면 전체 카테고리를 보여준다).
   const displayedResults = useMemo(() => {
     let list = recommended;
-    if (categoryFilter.size > 0) {
-      list = list.filter((p) => categoryFilter.has(p.category));
+    if (activeProfile.interests.length > 0) {
+      list = list.filter((p) => activeProfile.interests.includes(p.category));
     }
     const sorted = [...list];
     if (sortOption === 'score') {
@@ -509,15 +540,40 @@ export default function CheongbajiPage() {
       sorted.sort((a, b) => (b.support_amount ?? 0) - (a.support_amount ?? 0));
     }
     return sorted;
-  }, [recommended, categoryFilter, sortOption, today]);
+  }, [recommended, activeProfile.interests, sortOption, today]);
 
-  // 시너지 추천 카드: 추천 목록 중 가장 순위 높은 '주거' + '일자리' 정책 조합
+  // 시너지 추천 카드: '주거+일자리' 고정이 아니라, 내가 선택한 관심분야 중
+  // 적합도가 가장 높은 서로 다른 카테고리 2개를 조합한다.
+  // (관심분야만으로 2개를 채우지 못하면, 나머지는 전체 추천 중 적합도 높은 다른 카테고리로 보충)
   const synergyPackage = useMemo(() => {
-    const housing = recommended.find((p) => p.category === '주거');
-    const job = recommended.find((p) => p.category === '일자리');
-    if (!housing || !job) return null;
-    return { housing, job, total: (housing.support_amount ?? 0) + (job.support_amount ?? 0) };
-  }, [recommended]);
+    const uniqueInterests = activeProfile.interests.filter((c, i, arr) => arr.indexOf(c) === i);
+
+    const picks: RecommendedPolicy[] = [];
+    const usedCategories = new Set<string>();
+
+    for (const category of uniqueInterests) {
+      if (picks.length >= 2) break;
+      const match = recommended.find((p) => p.category === category && !usedCategories.has(p.category));
+      if (match) {
+        picks.push(match);
+        usedCategories.add(match.category);
+      }
+    }
+
+    if (picks.length < 2) {
+      for (const p of recommended) {
+        if (picks.length >= 2) break;
+        if (!usedCategories.has(p.category)) {
+          picks.push(p);
+          usedCategories.add(p.category);
+        }
+      }
+    }
+
+    if (picks.length < 2) return null;
+    const [first, second] = picks;
+    return { first, second, total: (first.support_amount ?? 0) + (second.support_amount ?? 0) };
+  }, [recommended, activeProfile.interests]);
 
   function handleSearch() {
     setIsSearching(true);
@@ -539,15 +595,6 @@ export default function CheongbajiPage() {
         ...prev,
         interests: has ? prev.interests.filter((c) => c !== category) : [...prev.interests, category],
       };
-    });
-  }
-
-  function toggleCategoryFilter(category: string) {
-    setCategoryFilter((prev) => {
-      const next = new Set(prev);
-      if (next.has(category)) next.delete(category);
-      else next.add(category);
-      return next;
     });
   }
 
@@ -577,10 +624,10 @@ export default function CheongbajiPage() {
             <div className="mt-5 rounded-2xl bg-white/10 p-4 backdrop-blur-sm ring-1 ring-white/20 sm:p-5">
               <div className="flex items-center gap-2 text-sm font-medium text-indigo-100">
                 <Sparkle className="h-4 w-4" />
-                회원님의 이번 달 최적 패키지 ({synergyPackage.housing.category}+{synergyPackage.job.category})
+                회원님의 이번 달 최적 패키지 ({synergyPackage.first.category}+{synergyPackage.second.category})
               </div>
               <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                {[synergyPackage.housing, synergyPackage.job].map((p) => (
+                {[synergyPackage.first, synergyPackage.second].map((p) => (
                   <div key={p.policy_id} className="rounded-xl bg-white/95 p-3 text-slate-900">
                     <p className="text-xs font-medium text-indigo-600">{p.category}</p>
                     <p className="mt-0.5 truncate text-sm font-semibold">{p.title}</p>
@@ -748,38 +795,11 @@ export default function CheongbajiPage() {
         {/* ============ 결과 대시보드 ============ */}
         <section className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-[220px_1fr]">
           {/* 좌측: 필터 */}
+          {/* 결과를 따로 거르는 "관심 분야 필터"는 두지 않는다 — 위 프로필의 "관심 분야"
+              선택이 이미 displayedResults에 그대로 반영되므로, 같은 역할을 하는
+              체크박스를 두 번 두는 대신 정렬 옵션만 남긴다. */}
           <aside className="h-fit rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-900">
-              <Filter className="h-4 w-4 text-slate-400" />
-              관심 분야 필터
-            </div>
-            <div className="mt-3 space-y-2">
-              {CATEGORY_OPTIONS.map((category) => {
-                const checked = categoryFilter.has(category);
-                return (
-                  <label key={category} className="flex cursor-pointer items-center gap-2 text-sm text-slate-600">
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleCategoryFilter(category)}
-                      className="h-4 w-4 rounded border-slate-300 accent-indigo-600"
-                    />
-                    {category}
-                  </label>
-                );
-              })}
-            </div>
-            {categoryFilter.size > 0 && (
-              <button
-                type="button"
-                onClick={() => setCategoryFilter(new Set())}
-                className="mt-3 text-xs font-medium text-indigo-600 hover:underline"
-              >
-                필터 초기화
-              </button>
-            )}
-
-            <div className="mt-6 flex items-center gap-1.5 text-sm font-semibold text-slate-900">
               <SlidersHorizontal className="h-4 w-4 text-slate-400" />
               정렬
             </div>
