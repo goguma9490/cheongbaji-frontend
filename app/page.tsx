@@ -1035,6 +1035,22 @@ export default function CheongbajiPage() {
     }
   }
 
+  // 관심 분야 "전체 선택"/"전체 해제" 버튼: 체크박스를 하나씩 누르지 않아도
+  // 한 번에 다 켜거나 다 끌 수 있게 한다. toggleInterest와 동일한 즉시-적용
+  // 규칙을 따른다(draftProfile/activeProfile 둘 다 바로 갱신 + 이미 저장된
+  // 프로필이 있으면 서버에도 바로 반영, draftProfile 전체가 아니라
+  // savedProfile 기준으로 interests만 바꿔서 저장).
+  function setAllInterests(nextInterests: string[]) {
+    setDraftProfile((prev) => ({ ...prev, interests: nextInterests }));
+    setActiveProfile((prev) => ({ ...prev, interests: nextInterests }));
+
+    if (session && savedProfile) {
+      const payload: RecommendationUser = { ...savedProfile, interests: nextInterests };
+      setSavedProfile(payload);
+      saveUserProfile(session.user.id, payload);
+    }
+  }
+
   // ⚠️ setState의 updater 함수 안에서 네트워크 요청(upsertUserChecklist)을
   // 직접 호출하지 않는다 - React(개발 모드의 Strict Mode)는 updater 함수를
   // 두 번 호출할 수 있어서, 그 안에 side effect를 두면 저장 요청이 중복
@@ -1393,10 +1409,29 @@ export default function CheongbajiPage() {
             값이라, [저장]/[수정]에 묶인 '내 프로필' 박스 밖에 따로 두고
             누르는 즉시 결과에 반영되게 한다(toggleInterest 참고). */}
         <section className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
-          <label className="flex items-center gap-1.5 text-sm font-medium text-slate-700">
-            <Heart className="h-4 w-4 text-slate-400" />
-            관심 분야 (복수 선택 · 바로 적용돼요)
-          </label>
+          <div className="flex items-center justify-between gap-2">
+            <label className="flex items-center gap-1.5 text-sm font-medium text-slate-700">
+              <Heart className="h-4 w-4 text-slate-400" />
+              관심 분야 (복수 선택 · 바로 적용돼요)
+            </label>
+            {draftProfile.interests.length === CATEGORY_OPTIONS.length ? (
+              <button
+                type="button"
+                onClick={() => setAllInterests([])}
+                className="shrink-0 text-xs font-semibold text-slate-500 hover:text-slate-700 hover:underline"
+              >
+                전체 해제
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setAllInterests([...CATEGORY_OPTIONS])}
+                className="shrink-0 text-xs font-semibold text-indigo-600 hover:underline"
+              >
+                전체 선택
+              </button>
+            )}
+          </div>
           <div className="mt-2 flex flex-wrap gap-2">
             {CATEGORY_OPTIONS.map((category) => {
               const checked = draftProfile.interests.includes(category);
