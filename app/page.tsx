@@ -21,6 +21,7 @@ import {
   GraduationCap,
   Palette,
   Sparkle,
+  Info,
 } from 'lucide-react';
 import { supabase } from '../lib/supabaseClient';
 
@@ -933,6 +934,15 @@ export default function CheongbajiPage() {
 
               <div>
                 <p className="font-semibold text-slate-900">필수 제출 서류</p>
+                {selectedPolicy.documents.length === 0 ? (
+                  <div className="mt-1.5 flex items-start gap-2 rounded-lg bg-slate-50 px-3 py-2.5 text-slate-500">
+                    <Info className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
+                    <p>
+                      공고문에서 제출 서류 정보를 찾지 못했어요. 아래 ‘공식 사이트에서 신청하기’를
+                      눌러 직접 확인해주세요.
+                    </p>
+                  </div>
+                ) : (
                 <ul className="mt-1.5 space-y-1.5">
                   {selectedPolicy.documents.map((doc) => {
                     const checkedSet = documentChecks[selectedPolicy.policy_id];
@@ -960,6 +970,7 @@ export default function CheongbajiPage() {
                     );
                   })}
                 </ul>
+                )}
               </div>
             </div>
 
