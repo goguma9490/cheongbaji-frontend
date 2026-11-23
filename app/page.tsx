@@ -464,6 +464,17 @@ function withDistrictPrefix(title: string, district: string | null): string {
   return `(${district}) ${title}`;
 }
 
+// apply_url 중 일부(4건 확인)가 'https://' 스킴 없이 'www.bokjiro.go.kr'처럼
+// 맨 도메인만 저장돼 있다. 스킴이 없는 주소를 <a href>에 그대로 넣으면
+// 브라우저가 현재 사이트 기준 상대경로로 해석해서
+// 'cheongbaji-frontend.vercel.app/www.bokjiro.go.kr' 같은 404 링크가 돼버린다.
+function normalizeApplyUrl(url: string | null | undefined): string {
+  const trimmed = (url ?? '').trim();
+  if (!trimmed) return '#';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
+}
+
 async function fetchPoliciesFromSupabase(): Promise<Policy[]> {
   const { data: policyRows, error: policyError } = await supabase
     .from('policies')
@@ -498,7 +509,7 @@ async function fetchPoliciesFromSupabase(): Promise<Policy[]> {
       target_employment: row.target_employment,
       support_amount: row.max_benefit_amount,
       deadline: row.closing_date,
-      source_url: row.apply_url,
+      source_url: normalizeApplyUrl(row.apply_url),
       documents: docsByPolicy[row.policy_id] ?? [],
     };
   });
