@@ -874,14 +874,34 @@ export default function CheongbajiPage() {
     }
   }
 
+  // 관심 분야는 '내 프로필' 저장/수정 박스에 안 묶여있는 별도의 즉시-적용
+  // 필터다(수정 잠금 여부와 무관하게 항상 바로 바뀜). 그래서:
+  // 1) draftProfile과 activeProfile(=실제 추천/적합도 계산에 쓰이는 값)을
+  //    둘 다 바로 갱신해서 [맞춤 정책 찾기]를 누르지 않아도 결과에 즉시
+  //    반영되고,
+  // 2) 로그인 상태에서 이미 저장된 프로필이 있으면 그 자리에서 바로 서버에도
+  //    반영한다. 단, 지금 나이/지역/소득/취업상태를 수정 중이라 draftProfile
+  //    에 아직 저장 안 한 값이 섞여 있을 수 있으므로, draftProfile을 그대로
+  //    저장해버리면 그 미저장 수정값까지 같이 새어나가 저장돼버린다(저장
+  //    버튼을 따로 둔 의미가 없어짐). 그래서 draftProfile이 아니라 마지막
+  //    으로 실제 저장된 값(savedProfile)을 기준으로 interests만 바꿔서
+  //    저장한다. (아직 한 번도 저장한 적 없는 신규 사용자는 savedProfile이
+  //    없으므로 이 즉시-저장은 건너뛰고, 나중에 처음 [저장]을 누를 때
+  //    draftProfile에 이미 반영된 interests가 함께 저장된다.)
   function toggleInterest(category: string) {
-    setDraftProfile((prev) => {
-      const has = prev.interests.includes(category);
-      return {
-        ...prev,
-        interests: has ? prev.interests.filter((c) => c !== category) : [...prev.interests, category],
-      };
-    });
+    const has = draftProfile.interests.includes(category);
+    const nextInterests = has
+      ? draftProfile.interests.filter((c) => c !== category)
+      : [...draftProfile.interests, category];
+
+    setDraftProfile((prev) => ({ ...prev, interests: nextInterests }));
+    setActiveProfile((prev) => ({ ...prev, interests: nextInterests }));
+
+    if (session && savedProfile) {
+      const payload: RecommendationUser = { ...savedProfile, interests: nextInterests };
+      setSavedProfile(payload);
+      saveUserProfile(session.user.id, payload);
+    }
   }
 
   // ⚠️ setState의 updater 함수 안에서 네트워크 요청(upsertUserChecklist)을
@@ -1143,42 +1163,6 @@ export default function CheongbajiPage() {
             </div>
           </div>
 
-          {/* 관심 분야 */}
-          <div className={`mt-5 ${profileLocked ? 'opacity-60' : ''}`}>
-            <label className="flex items-center gap-1.5 text-sm font-medium text-slate-700">
-              <Heart className="h-4 w-4 text-slate-400" />
-              관심 분야 (복수 선택)
-            </label>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {CATEGORY_OPTIONS.map((category) => {
-                const checked = draftProfile.interests.includes(category);
-                const Icon = CATEGORY_ICON[category] ?? Heart;
-                return (
-                  <label
-                    key={category}
-                    className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm transition ${
-                      profileLocked ? 'cursor-not-allowed' : 'cursor-pointer'
-                    } ${
-                      checked
-                        ? 'border-indigo-600 bg-indigo-50 text-indigo-700'
-                        : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      disabled={profileLocked}
-                      onChange={() => toggleInterest(category)}
-                      className="hidden"
-                    />
-                    <Icon className="h-3.5 w-3.5" />
-                    {category}
-                  </label>
-                );
-              })}
-            </div>
-          </div>
-
           <div className="mt-5 flex flex-wrap items-center gap-2">
             <button
               type="button"
@@ -1242,6 +1226,42 @@ export default function CheongbajiPage() {
               [저장]을 눌러야 이 프로필이 서버에 저장돼요. 저장해두면 다음에 로그인했을 때도 그대로 불러올 수 있어요.
             </p>
           )}
+        </section>
+
+        {/* ============ 관심 분야 (즉시 적용되는 독립 필터) ============ */}
+        {/* 나이/지역/소득/취업상태와 달리 관심 분야는 자주 바꿔보고 싶은
+            값이라, [저장]/[수정]에 묶인 '내 프로필' 박스 밖에 따로 두고
+            누르는 즉시 결과에 반영되게 한다(toggleInterest 참고). */}
+        <section className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+          <label className="flex items-center gap-1.5 text-sm font-medium text-slate-700">
+            <Heart className="h-4 w-4 text-slate-400" />
+            관심 분야 (복수 선택 · 바로 적용돼요)
+          </label>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {CATEGORY_OPTIONS.map((category) => {
+              const checked = draftProfile.interests.includes(category);
+              const Icon = CATEGORY_ICON[category] ?? Heart;
+              return (
+                <label
+                  key={category}
+                  className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-2 text-sm transition ${
+                    checked
+                      ? 'border-indigo-600 bg-indigo-50 text-indigo-700'
+                      : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleInterest(category)}
+                    className="hidden"
+                  />
+                  <Icon className="h-3.5 w-3.5" />
+                  {category}
+                </label>
+              );
+            })}
+          </div>
         </section>
 
         {/* ============ 결과 대시보드 ============ */}
