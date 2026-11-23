@@ -390,8 +390,28 @@ function inferCategoryFromText(text: string): string | null {
 
 function normalizeCategory(rawCategory: string | null | undefined, ...textParts: Array<string | null | undefined>): string {
   if (rawCategory && CATEGORY_OPTIONS.includes(rawCategory)) return rawCategory;
+
+  // 온통청년 등 정부 API 원본 분류(raw_category) 문자열이 우리 5개 카테고리
+  // 이름을 그대로 포함하는 경우가 많다. 예) '교육・직업훈련', '복지.문화',
+  // '일자리,교육', '교육・직업훈련,교육・직업훈련'(원본 데이터 자체의 중복
+  // 표기) 처럼 구분자만 다르거나 다른 분류와 합쳐진 경우가 있는데, 이걸
+  // 그대로 카테고리로 쓰면 화면에 이상한 원본 문자열이 그대로 노출되고
+  // (예: '교육・직업훈련,교육・직업훈련'), 관심 분야 체크박스(5개)와 전혀
+  // 안 맞아서 그 정책은 추천 결과에서 영영 숨겨진다. 본문 키워드 추론보다
+  // 먼저 원본 분류 문자열 자체에서 우리 카테고리명을 찾는 게 더 정확하다.
+  const rawMatch = rawCategory ? CATEGORY_OPTIONS.find((c) => rawCategory.includes(c)) : null;
+  if (rawMatch) return rawMatch;
+
   const inferred = inferCategoryFromText(textParts.filter(Boolean).join(' '));
-  return inferred ?? rawCategory ?? '기타';
+  if (inferred) return inferred;
+
+  // 정부 API의 '참여권리' / '참여・기반' 계열(청년참여기구・위원회・네트워크
+  // 운영 등)은 우리 5개 카테고리 중 깔끔하게 대응되는 게 없다. 분류 없이
+  // 그대로 두면 역시 원본 문자열이 노출되고 추천에서 숨겨지므로, 가장
+  // 가까운 '문화'(참여・커뮤니티 활동) 버킷으로 묶어서 최소한 보이게 한다.
+  if (rawCategory && (rawCategory.includes('참여') || rawCategory.includes('권리'))) return '문화';
+
+  return rawCategory ?? '기타';
 }
 
 // 정책 제목 맨 앞의 '(영종구)', '(평택시)' 같은 괄호 표기에서 세부 구/군/시를
@@ -1217,10 +1237,11 @@ export default function CheongbajiPage() {
               </select>
             </div>
 
-            {/* 구/군/시: 선택한 지역 안에서 실제로 데이터에 있는(= 그 지역
-                정책 중 제목에 특정 구/군/시가 박혀있는) 것들만 보여준다.
-                하나도 없으면(예: 데이터가 '전국' 단위뿐인 지역) 필드 자체를
-                숨긴다 - 골라봤자 적용될 정책이 없으니 혼란만 준다. */}
+            {/* 구/군/시: 선택한 지역(서울/인천/경기)의 행정구역 전체 목록을
+                보여준다 - 지금 그 구를 대상으로 하는 정책이 실제로 있는지와
+                무관하게 다 보여준다(사용자 요청: "정책 없더라도 전체 구로
+                표시"). REGION_OPTIONS에 있는 지역은 전부 DISTRICT_CANDIDATES에
+                목록이 있어서 이 블록은 항상 보인다. */}
             {availableDistricts.length > 0 && (
               <div>
                 <label className="flex items-center gap-1.5 text-sm font-medium text-slate-700">
