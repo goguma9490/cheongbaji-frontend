@@ -47,6 +47,7 @@ import { supabase } from '../lib/supabaseClient';
 interface RecommendationUser {
   age: number;
   region: string;
+  gu: string; // 세부 구/군/시 (예: '연수구'). 빈 문자열 = 세부 지역 미선택(전체)
   income: number; // 월 소득 (원)
   employment_status: string;
   interests: string[];
@@ -69,6 +70,7 @@ interface Policy {
   min_age: number | null;
   max_age: number | null;
   target_region: string | null; // 서울/인천/경기 등 특정 지역명 (서비스가 수도권으로 한정되어 '전국'은 쓰지 않음)
+  target_district: string | null; // 제목의 '(OO구)' 같은 접두어에서 뽑아낸 세부 구/군/시. 없으면 시/도 전체 대상.
   max_income: number | null; // 월 소득 상한 (원)
   target_employment: string | null; // null이면 고용상태 무관
 
@@ -103,6 +105,13 @@ function passesHardFilter(user: RecommendationUser, policy: Policy, today: Date)
   // (target_region이 null인 데이터는 지역 정보 미기재로 간주해 통과시킨다)
   const regionOk = policy.target_region == null || policy.target_region === user.region;
 
+  // 정책 제목에 '(영종구)'처럼 특정 구/군/시가 박혀있는 경우, 그 지역 주민만
+  // 실제로 신청 가능한 정책이다. 사용자가 구체적인 구/군/시를 고르지 않았으면
+  // (user.gu === '') 걸러내지 않고 다 보여주고, 골랐으면 정확히 일치하는
+  // 것만(또는 구 제한이 아예 없는 시 전체 대상 정책만) 통과시킨다.
+  const districtOk =
+    policy.target_district == null || !user.gu || policy.target_district === user.gu;
+
   const incomeOk = policy.max_income == null || user.income <= policy.max_income;
 
   const employmentOk =
@@ -115,7 +124,7 @@ function passesHardFilter(user: RecommendationUser, policy: Policy, today: Date)
   const dday = getDday(policy.deadline, today);
   const deadlineOk = dday === null || dday >= 0;
 
-  return ageOk && regionOk && incomeOk && employmentOk && deadlineOk;
+  return ageOk && regionOk && districtOk && incomeOk && employmentOk && deadlineOk;
 }
 
 function atMidnight(d: Date): Date {
@@ -226,6 +235,7 @@ function buildDummyPolicies(): Policy[] {
       min_age: 19,
       max_age: 39,
       target_region: '서울',
+      target_district: null,
       max_income: 3_000_000,
       target_employment: null,
       support_amount: 2_400_000,
@@ -248,6 +258,7 @@ function buildDummyPolicies(): Policy[] {
       min_age: 19,
       max_age: 34,
       target_region: '경기',
+      target_district: null,
       max_income: null,
       target_employment: '재직자',
       support_amount: 16_000_000,
@@ -268,6 +279,7 @@ function buildDummyPolicies(): Policy[] {
       min_age: 19,
       max_age: 34,
       target_region: '서울',
+      target_district: null,
       max_income: 2_500_000,
       target_employment: '미취업자',
       support_amount: 3_000_000,
@@ -289,6 +301,7 @@ function buildDummyPolicies(): Policy[] {
       min_age: 18,
       max_age: 39,
       target_region: '인천',
+      target_district: null,
       max_income: 2_800_000,
       target_employment: null,
       support_amount: 6_000_000,
@@ -310,6 +323,7 @@ function buildDummyPolicies(): Policy[] {
       min_age: 19,
       max_age: 34,
       target_region: '경기',
+      target_district: null,
       max_income: null,
       target_employment: null,
       support_amount: 150_000,
@@ -327,6 +341,7 @@ function buildDummyPolicies(): Policy[] {
       min_age: 19,
       max_age: 29,
       target_region: '인천',
+      target_district: null,
       max_income: null,
       target_employment: '미취업자',
       support_amount: null,
@@ -379,6 +394,17 @@ function normalizeCategory(rawCategory: string | null | undefined, ...textParts:
   return inferred ?? rawCategory ?? '기타';
 }
 
+// 정책 제목 맨 앞의 '(영종구)', '(평택시)' 같은 괄호 표기에서 세부 구/군/시를
+// 뽑아낸다. 이게 붙은 정책은 그 지역 주민만 실제로 신청할 수 있는 경우가
+// 많아서(인천 쪽이 특히 많음 - 219건 중 99건), 시/도 단위(target_region)
+// 만으로는 '영종구 전용' 정책이 다른 구 주민에게도 추천되는 문제가 있었다.
+const DISTRICT_PREFIX_RE = /^\(([가-힣]+(?:구|군|시))\)/;
+
+function extractDistrict(title: string): string | null {
+  const m = DISTRICT_PREFIX_RE.exec(title.trim());
+  return m ? m[1] : null;
+}
+
 async function fetchPoliciesFromSupabase(): Promise<Policy[]> {
   const { data: policyRows, error: policyError } = await supabase
     .from('policies')
@@ -406,6 +432,7 @@ async function fetchPoliciesFromSupabase(): Promise<Policy[]> {
     min_age: row.min_age,
     max_age: row.max_age,
     target_region: row.target_region,
+    target_district: extractDistrict(row.title ?? ''),
     max_income: row.max_income,
     target_employment: row.target_employment,
     support_amount: row.max_benefit_amount,
@@ -480,7 +507,7 @@ async function upsertUserChecklist(
 async function fetchUserProfile(userId: string): Promise<RecommendationUser | null> {
   const { data, error } = await supabase
     .from('user_profile')
-    .select('age, region, income, employment_status, interests')
+    .select('age, region, gu, income, employment_status, interests')
     .eq('user_id', userId)
     .maybeSingle();
   if (error) {
@@ -491,6 +518,7 @@ async function fetchUserProfile(userId: string): Promise<RecommendationUser | nu
   return {
     age: data.age,
     region: data.region,
+    gu: data.gu ?? '', // gu 컬럼을 아직 추가하기 전에 저장된 기존 행에는 값이 없을 수 있음
     income: data.income,
     employment_status: data.employment_status,
     interests: data.interests ?? [],
@@ -503,6 +531,7 @@ async function saveUserProfile(userId: string, profile: RecommendationUser) {
       user_id: userId,
       age: profile.age,
       region: profile.region,
+      gu: profile.gu,
       income: profile.income, // 프로필 입력폼과 동일하게 '만원' 단위로 저장 (activeProfile의 원 단위가 아님)
       employment_status: profile.employment_status,
       interests: profile.interests,
@@ -518,6 +547,7 @@ async function saveUserProfile(userId: string, profile: RecommendationUser) {
 const DEFAULT_DRAFT_PROFILE: RecommendationUser = {
   age: 27,
   region: '서울',
+  gu: '', // 세부 구/군/시 미선택(전체)
   income: 200, // 만원 단위로 입력받음 (활성 프로필에서는 *10000 하여 사용)
   employment_status: '미취업자',
   interests: ['일자리', '주거'],
@@ -588,7 +618,11 @@ function getEligibilityChips(policy: Policy): string[] {
     chips.push('연령 제한 없음');
   }
 
-  chips.push(policy.target_region ?? '지역 무관');
+  chips.push(
+    policy.target_district
+      ? `${policy.target_region ?? ''} ${policy.target_district}`.trim()
+      : policy.target_region ?? '지역 무관'
+  );
   chips.push(formatIncomeCondition(policy.max_income));
   chips.push(policy.target_employment ?? '고용상태 무관');
 
@@ -633,6 +667,19 @@ export default function CheongbajiPage() {
 
   // 입력 중인 프로필 (컨트롤된 폼 state)
   const [draftProfile, setDraftProfile] = useState<RecommendationUser>(DEFAULT_DRAFT_PROFILE);
+
+  // 지금 고른 지역(region) 안에서 실제로 존재하는 구/군/시 목록 (정책 제목의
+  // '(OO구)' 표기에서 뽑아낸 target_district 기준). 지역을 바꾸면 자동으로
+  // 그 지역에 맞는 목록으로 다시 계산된다.
+  const availableDistricts = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of policies) {
+      if (p.target_region === draftProfile.region && p.target_district) {
+        set.add(p.target_district);
+      }
+    }
+    return [...set].sort();
+  }, [policies, draftProfile.region]);
 
   // [맞춤 정책 찾기] 버튼을 눌렀을 때만 갱신되는 "적용된" 프로필
   const [activeProfile, setActiveProfile] = useState<RecommendationUser>({
@@ -1122,7 +1169,9 @@ export default function CheongbajiPage() {
               <select
                 value={draftProfile.region}
                 disabled={profileLocked}
-                onChange={(e) => setDraftProfile((prev) => ({ ...prev, region: e.target.value }))}
+                onChange={(e) =>
+                  setDraftProfile((prev) => ({ ...prev, region: e.target.value, gu: '' }))
+                }
                 className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-50 disabled:text-slate-400"
               >
                 {REGION_OPTIONS.map((r) => (
@@ -1132,6 +1181,32 @@ export default function CheongbajiPage() {
                 ))}
               </select>
             </div>
+
+            {/* 구/군/시: 선택한 지역 안에서 실제로 데이터에 있는(= 그 지역
+                정책 중 제목에 특정 구/군/시가 박혀있는) 것들만 보여준다.
+                하나도 없으면(예: 데이터가 '전국' 단위뿐인 지역) 필드 자체를
+                숨긴다 - 골라봤자 적용될 정책이 없으니 혼란만 준다. */}
+            {availableDistricts.length > 0 && (
+              <div>
+                <label className="flex items-center gap-1.5 text-sm font-medium text-slate-700">
+                  <MapPin className="h-4 w-4 text-slate-400" />
+                  구/군/시
+                </label>
+                <select
+                  value={draftProfile.gu}
+                  disabled={profileLocked}
+                  onChange={(e) => setDraftProfile((prev) => ({ ...prev, gu: e.target.value }))}
+                  className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-50 disabled:text-slate-400"
+                >
+                  <option value="">전체</option>
+                  {availableDistricts.map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             {/* 월소득 */}
             <div>
