@@ -22,7 +22,14 @@ import {
   Palette,
   Sparkle,
   Info,
+  Bookmark,
+  BookmarkCheck,
+  LogIn,
+  LogOut,
+  Mail,
+  Lock,
 } from 'lucide-react';
+import type { Session } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabaseClient';
 
 /* ============================================================
@@ -406,6 +413,60 @@ async function fetchPoliciesFromSupabase(): Promise<Policy[]> {
   }));
 }
 
+/* ============================================================
+ * 2-1. 로그인 사용자의 "스크랩/체크리스트" 저장 (user_scrap_checklist 테이블)
+ * ------------------------------------------------------------
+ * 로그인하지 않은 상태에서는 documentChecks/scrappedIds가 메모리(React state)
+ * 에만 있어서 새로고침하면 사라진다. 로그인한 사용자는 Supabase의
+ * user_scrap_checklist 테이블(user_id + policy_id 당 1행, RLS로 본인 행만
+ * 접근 가능)에 저장해서 기기를 바꾸거나 새로고침해도 유지되게 한다.
+ * ============================================================ */
+
+interface ChecklistRow {
+  policy_id: string;
+  is_scrapped: boolean;
+  checked_documents: string[];
+}
+
+async function fetchUserChecklist(userId: string): Promise<Record<string, ChecklistRow>> {
+  const { data, error } = await supabase
+    .from('user_scrap_checklist')
+    .select('policy_id, is_scrapped, checked_documents')
+    .eq('user_id', userId);
+  if (error) {
+    console.error('체크리스트를 불러오지 못했습니다:', error);
+    return {};
+  }
+  const map: Record<string, ChecklistRow> = {};
+  for (const row of data ?? []) {
+    map[row.policy_id] = {
+      policy_id: row.policy_id,
+      is_scrapped: row.is_scrapped ?? false,
+      checked_documents: row.checked_documents ?? [],
+    };
+  }
+  return map;
+}
+
+async function upsertUserChecklist(
+  userId: string,
+  policyId: string,
+  patch: Partial<Pick<ChecklistRow, 'is_scrapped' | 'checked_documents'>>
+) {
+  const { error } = await supabase.from('user_scrap_checklist').upsert(
+    {
+      user_id: userId,
+      policy_id: policyId,
+      ...patch,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'user_id,policy_id' }
+  );
+  if (error) {
+    console.error('체크리스트 저장에 실패했습니다:', error);
+  }
+}
+
 const DUMMY_POLICIES = buildDummyPolicies();
 
 const REGION_OPTIONS = ['서울', '인천', '경기'];
@@ -545,6 +606,52 @@ export default function CheongbajiPage() {
     setSupportExpanded(false);
   }, [selectedPolicy?.policy_id]);
 
+  // ---- 로그인 상태 ----
+  const [session, setSession] = useState<Session | null>(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authSubmitting, setAuthSubmitting] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  // ---- 관심 정책 체크·스크랩 ----
+  // 로그인한 사용자는 Supabase(user_scrap_checklist)에서 불러와 기기를 바꿔도
+  // 유지되고, 로그아웃 상태에서는 이 세션(새로고침 전까지)에서만 유지된다.
+  const [scrappedIds, setScrappedIds] = useState<Set<string>>(new Set());
+  const [showOnlyScrapped, setShowOnlyScrapped] = useState(false);
+
+  useEffect(() => {
+    if (!session) {
+      // 로그아웃된 경우 서버에 저장된 적 없는 로컬 상태만 남기고 끝.
+      return;
+    }
+    let cancelled = false;
+    fetchUserChecklist(session.user.id).then((map) => {
+      if (cancelled) return;
+      const nextChecks: Record<string, Set<string>> = {};
+      const nextScrapped = new Set<string>();
+      for (const [policyId, row] of Object.entries(map)) {
+        nextChecks[policyId] = new Set(row.checked_documents);
+        if (row.is_scrapped) nextScrapped.add(policyId);
+      }
+      setDocumentChecks(nextChecks);
+      setScrappedIds(nextScrapped);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [session]);
+
   const recommended = useMemo(
     () => getRecommendedPolicies(activeProfile, policies, today),
     [activeProfile, policies, today]
@@ -565,6 +672,9 @@ export default function CheongbajiPage() {
         list = list.filter((p) => activeProfile.interests.includes(p.category));
       }
     }
+    if (showOnlyScrapped) {
+      list = list.filter((p) => scrappedIds.has(p.policy_id));
+    }
     const sorted = [...list];
     if (sortOption === 'score') {
       sorted.sort((a, b) => b.total_score - a.total_score);
@@ -581,7 +691,18 @@ export default function CheongbajiPage() {
       sorted.sort((a, b) => (b.support_amount ?? 0) - (a.support_amount ?? 0));
     }
     return sorted;
-  }, [recommended, activeProfile.interests, sortOption, today, viewMode]);
+  }, [recommended, activeProfile.interests, sortOption, today, viewMode, showOnlyScrapped, scrappedIds]);
+
+  // 정책이 많을 때 전부 한 번에 렌더링하지 않고 "더보기" 버튼으로 끊어서 보여준다.
+  const RESULTS_PAGE_SIZE = 10;
+  const [visibleCount, setVisibleCount] = useState(RESULTS_PAGE_SIZE);
+  useEffect(() => {
+    setVisibleCount(RESULTS_PAGE_SIZE);
+  }, [displayedResults]);
+  const visibleResults = useMemo(
+    () => displayedResults.slice(0, visibleCount),
+    [displayedResults, visibleCount]
+  );
 
   // 시너지 추천 카드: '주거+일자리' 고정이 아니라, 내가 선택한 관심분야 중
   // 적합도가 가장 높은 서로 다른 카테고리 2개를 조합한다.
@@ -639,13 +760,69 @@ export default function CheongbajiPage() {
     });
   }
 
+  // ⚠️ setState의 updater 함수 안에서 네트워크 요청(upsertUserChecklist)을
+  // 직접 호출하지 않는다 - React(개발 모드의 Strict Mode)는 updater 함수를
+  // 두 번 호출할 수 있어서, 그 안에 side effect를 두면 저장 요청이 중복
+  // 전송될 수 있다. 다음 값을 먼저 계산해서 setState에는 순수하게 넘기고,
+  // 저장 요청은 그 바깥에서 한 번만 실행한다.
   function toggleDocumentCheck(policyId: string, documentName: string) {
-    setDocumentChecks((prev) => {
-      const current = new Set(prev[policyId] ?? []);
-      if (current.has(documentName)) current.delete(documentName);
-      else current.add(documentName);
-      return { ...prev, [policyId]: current };
+    const nextSet = new Set(documentChecks[policyId] ?? []);
+    if (nextSet.has(documentName)) nextSet.delete(documentName);
+    else nextSet.add(documentName);
+
+    setDocumentChecks((prev) => ({ ...prev, [policyId]: nextSet }));
+    if (session) {
+      upsertUserChecklist(session.user.id, policyId, { checked_documents: Array.from(nextSet) });
+    }
+  }
+
+  function toggleScrap(policyId: string) {
+    const willScrap = !scrappedIds.has(policyId);
+
+    setScrappedIds((prev) => {
+      const next = new Set(prev);
+      if (willScrap) next.add(policyId);
+      else next.delete(policyId);
+      return next;
     });
+    if (session) {
+      upsertUserChecklist(session.user.id, policyId, { is_scrapped: willScrap });
+    }
+  }
+
+  async function handleAuthSubmit() {
+    setAuthSubmitting(true);
+    setAuthError(null);
+    setAuthNotice(null);
+    try {
+      if (authMode === 'signup') {
+        const { data, error } = await supabase.auth.signUp({ email: authEmail, password: authPassword });
+        if (error) throw error;
+        if (data.session) {
+          // 이메일 확인이 꺼져있는 프로젝트라면 가입 즉시 로그인된다.
+          setShowAuthModal(false);
+        } else {
+          setAuthNotice('가입 확인 메일을 보냈어요. 메일함을 확인하고 링크를 눌러주세요.');
+        }
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
+        if (error) throw error;
+        setShowAuthModal(false);
+      }
+      setAuthPassword('');
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : '로그인/가입 중 문제가 발생했어요.');
+    } finally {
+      setAuthSubmitting(false);
+    }
+  }
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    // 로그아웃하면 이 기기에만 남아있던 스크랩/체크 상태도 함께 비운다
+    // (다음 로그인 시 서버에 저장된 값으로 다시 채워짐).
+    setDocumentChecks({});
+    setScrappedIds(new Set());
   }
 
   return (
@@ -653,9 +830,39 @@ export default function CheongbajiPage() {
       {/* ============ 상단: 로고 + 시너지 추천 카드 ============ */}
       <header className="bg-gradient-to-br from-indigo-600 to-blue-600 text-white">
         <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
-          <div className="flex items-center gap-2">
-            <Sparkles className="h-6 w-6" />
-            <h1 className="text-xl font-bold sm:text-2xl">청바지: 청년혜택은 바로 지금</h1>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Sparkles className="h-6 w-6" />
+              <h1 className="text-xl font-bold sm:text-2xl">청바지: 청년혜택은 바로 지금</h1>
+            </div>
+
+            {/* 로그인하면 체크·스크랩이 기기를 바꿔도 저장된다 */}
+            {session ? (
+              <div className="flex items-center gap-2 text-sm">
+                <span className="hidden text-indigo-100 sm:inline">{session.user.email}</span>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="flex items-center gap-1 rounded-lg bg-white/10 px-3 py-1.5 font-medium ring-1 ring-white/20 transition hover:bg-white/20"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                  로그아웃
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthError(null);
+                  setAuthNotice(null);
+                  setShowAuthModal(true);
+                }}
+                className="flex items-center gap-1 rounded-lg bg-white/10 px-3 py-1.5 text-sm font-medium ring-1 ring-white/20 transition hover:bg-white/20"
+              >
+                <LogIn className="h-3.5 w-3.5" />
+                로그인
+              </button>
+            )}
           </div>
           <p className="mt-1 text-sm text-indigo-100">
             내 조건에 딱 맞는 청년 정책을 한 번에 찾아드려요.
@@ -889,29 +1096,51 @@ export default function CheongbajiPage() {
               </button>
             </div>
 
-            <p className="mb-3 text-sm text-slate-500">
-              {viewMode === 'recommended' ? (
-                <>
-                  총 <span className="font-semibold text-slate-900">{displayedResults.length}개</span>의 맞춤 정책을 찾았어요.
-                </>
-              ) : (
-                <>
-                  적합도 0점인 정책도 포함해서, 조건(나이·지역·소득·취업상태·마감일)에 맞는 정책을 전부
-                  보여드려요. 총 <span className="font-semibold text-slate-900">{displayedResults.length}개</span>.
-                </>
-              )}
-            </p>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <p className="text-sm text-slate-500">
+                {viewMode === 'recommended' ? (
+                  <>
+                    총 <span className="font-semibold text-slate-900">{displayedResults.length}개</span>의 맞춤 정책을 찾았어요.
+                  </>
+                ) : (
+                  <>
+                    적합도 0점인 정책도 포함해서, 조건(나이·지역·소득·취업상태·마감일)에 맞는 정책을 전부
+                    보여드려요. 총 <span className="font-semibold text-slate-900">{displayedResults.length}개</span>.
+                  </>
+                )}
+              </p>
+
+              <label className="flex items-center gap-1.5 text-sm font-medium text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={showOnlyScrapped}
+                  onChange={(e) => setShowOnlyScrapped(e.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                />
+                <BookmarkCheck className="h-3.5 w-3.5 text-indigo-500" />
+                스크랩한 정책만
+              </label>
+            </div>
+
+            {!session && (
+              <p className="mb-3 text-xs text-slate-400">
+                체크·스크랩은 로그인하면 기기를 바꾸거나 새로고침해도 저장돼요.
+              </p>
+            )}
 
             {displayedResults.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-500">
-                {viewMode === 'recommended'
+                {showOnlyScrapped
+                  ? '스크랩한 정책이 없어요. 정책 카드의 북마크 아이콘을 눌러 스크랩해보세요.'
+                  : viewMode === 'recommended'
                   ? '조건에 맞는 정책이 없어요. 프로필을 조정하고 다시 찾아보세요.'
                   : '조건에 맞는 정책이 없어요. 프로필(나이·지역·소득·취업상태)을 조정해보세요.'}
               </div>
             ) : (
               <div className="space-y-3">
-                {displayedResults.map((policy) => {
+                {visibleResults.map((policy) => {
                   const dday = getDdayLabel(policy.deadline, today);
+                  const isScrapped = scrappedIds.has(policy.policy_id);
                   return (
                     <div
                       key={policy.policy_id}
@@ -936,6 +1165,23 @@ export default function CheongbajiPage() {
                         <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">
                           {policy.category}
                         </span>
+
+                        <button
+                          type="button"
+                          onClick={() => toggleScrap(policy.policy_id)}
+                          aria-label={isScrapped ? '스크랩 해제' : '스크랩하기'}
+                          className={`ml-auto flex items-center justify-center rounded-full p-1.5 transition ${
+                            isScrapped
+                              ? 'text-indigo-600 hover:bg-indigo-50'
+                              : 'text-slate-300 hover:bg-slate-100 hover:text-slate-500'
+                          }`}
+                        >
+                          {isScrapped ? (
+                            <BookmarkCheck className="h-4 w-4" />
+                          ) : (
+                            <Bookmark className="h-4 w-4" />
+                          )}
+                        </button>
                       </div>
 
                       <h3 className="mt-2 text-base font-semibold text-slate-900">{policy.title}</h3>
@@ -956,6 +1202,16 @@ export default function CheongbajiPage() {
                     </div>
                   );
                 })}
+
+                {visibleCount < displayedResults.length && (
+                  <button
+                    type="button"
+                    onClick={() => setVisibleCount((prev) => prev + RESULTS_PAGE_SIZE)}
+                    className="w-full rounded-xl border border-slate-300 bg-white py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-50"
+                  >
+                    더보기 ({displayedResults.length - visibleCount}개 더 있어요)
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -980,14 +1236,32 @@ export default function CheongbajiPage() {
                 <h3 className="mt-2 text-lg font-bold text-slate-900">{selectedPolicy.title}</h3>
                 <p className="text-sm text-slate-500">{selectedPolicy.organization}</p>
               </div>
-              <button
-                type="button"
-                onClick={() => setSelectedPolicy(null)}
-                className="rounded-full p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
-                aria-label="닫기"
-              >
-                <X className="h-5 w-5" />
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => toggleScrap(selectedPolicy.policy_id)}
+                  aria-label={scrappedIds.has(selectedPolicy.policy_id) ? '스크랩 해제' : '스크랩하기'}
+                  className={`rounded-full p-1.5 transition ${
+                    scrappedIds.has(selectedPolicy.policy_id)
+                      ? 'text-indigo-600 hover:bg-indigo-50'
+                      : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'
+                  }`}
+                >
+                  {scrappedIds.has(selectedPolicy.policy_id) ? (
+                    <BookmarkCheck className="h-5 w-5" />
+                  ) : (
+                    <Bookmark className="h-5 w-5" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedPolicy(null)}
+                  className="rounded-full p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                  aria-label="닫기"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
             </div>
 
             <div className="mt-4 space-y-4 text-sm">
@@ -1073,6 +1347,98 @@ export default function CheongbajiPage() {
               공식 사이트에서 신청하기
               <ExternalLink className="h-4 w-4" />
             </a>
+          </div>
+        </div>
+      )}
+
+      {/* ============ 로그인 / 회원가입 모달 ============ */}
+      {showAuthModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/50 p-0 sm:items-center sm:p-4"
+          onClick={() => setShowAuthModal(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-t-2xl bg-white p-5 shadow-xl sm:rounded-2xl sm:p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold text-slate-900">
+                {authMode === 'login' ? '로그인' : '회원가입'}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowAuthModal(false)}
+                className="rounded-full p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                aria-label="닫기"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <p className="mt-1 text-sm text-slate-500">
+              로그인하면 체크·스크랩이 기기를 바꾸거나 새로고침해도 저장돼요.
+            </p>
+
+            <form
+              className="mt-4 space-y-3"
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleAuthSubmit();
+              }}
+            >
+              <label className="block">
+                <span className="mb-1 flex items-center gap-1 text-xs font-medium text-slate-600">
+                  <Mail className="h-3.5 w-3.5" />
+                  이메일
+                </span>
+                <input
+                  type="email"
+                  required
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  placeholder="you@example.com"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1 flex items-center gap-1 text-xs font-medium text-slate-600">
+                  <Lock className="h-3.5 w-3.5" />
+                  비밀번호
+                </span>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  placeholder="6자 이상"
+                />
+              </label>
+
+              {authError && <p className="text-sm text-rose-600">{authError}</p>}
+              {authNotice && <p className="text-sm text-emerald-600">{authNotice}</p>}
+
+              <button
+                type="submit"
+                disabled={authSubmitting}
+                className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60"
+              >
+                <LogIn className="h-4 w-4" />
+                {authSubmitting ? '처리 중...' : authMode === 'login' ? '로그인' : '회원가입'}
+              </button>
+            </form>
+
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode((prev) => (prev === 'login' ? 'signup' : 'login'));
+                setAuthError(null);
+                setAuthNotice(null);
+              }}
+              className="mt-3 w-full text-center text-sm font-medium text-indigo-600 hover:underline"
+            >
+              {authMode === 'login' ? '계정이 없으신가요? 회원가입' : '이미 계정이 있으신가요? 로그인'}
+            </button>
           </div>
         </div>
       )}
