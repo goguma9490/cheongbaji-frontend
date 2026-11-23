@@ -28,6 +28,8 @@ import {
   LogOut,
   Mail,
   Lock,
+  Pencil,
+  Save,
 } from 'lucide-react';
 import type { Session } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabaseClient';
@@ -639,6 +641,17 @@ export default function CheongbajiPage() {
   });
   const [isSearching, setIsSearching] = useState(false);
 
+  // 프로필 저장/수정 상태:
+  // - profileSaved: 로그인 사용자의 저장된 프로필이 서버에 있는지
+  // - isEditingProfile: 지금 입력폼을 고칠 수 있는 상태인지 (저장된 프로필이
+  //   있으면 기본적으로 잠겨있다가 [수정]을 눌러야 고칠 수 있음. 비로그인
+  //   사용자나 아직 저장된 프로필이 없는 신규 사용자는 항상 고칠 수 있음)
+  // - savedProfile: [취소]를 눌렀을 때 되돌릴 "마지막으로 저장된 값"
+  const [profileSaved, setProfileSaved] = useState(false);
+  const [isEditingProfile, setIsEditingProfile] = useState(true);
+  const [savedProfile, setSavedProfile] = useState<RecommendationUser | null>(null);
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+
   // 결과 대시보드 상태
   const [sortOption, setSortOption] = useState<SortOption>('score');
 
@@ -656,6 +669,8 @@ export default function CheongbajiPage() {
 
   // ---- 로그인 상태 ----
   const [session, setSession] = useState<Session | null>(null);
+  // 로그인한 사용자가 저장된 프로필을 아직 수정 중이 아닐 때만 입력폼을 잠근다.
+  const profileLocked = !!session && profileSaved && !isEditingProfile;
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
   const [authEmail, setAuthEmail] = useState('');
@@ -707,9 +722,19 @@ export default function CheongbajiPage() {
     if (!session) return;
     let cancelled = false;
     fetchUserProfile(session.user.id).then((saved) => {
-      if (cancelled || !saved) return;
-      setDraftProfile(saved);
-      setActiveProfile({ ...saved, income: saved.income * 10_000 });
+      if (cancelled) return;
+      if (saved) {
+        setDraftProfile(saved);
+        setActiveProfile({ ...saved, income: saved.income * 10_000 });
+        setSavedProfile(saved);
+        setProfileSaved(true);
+        // 저장된 값이 있으면 실수로 건드리지 않도록 기본적으로 잠긴 채로 보여준다.
+        setIsEditingProfile(false);
+      } else {
+        // 아직 저장된 프로필이 없는 신규 로그인 사용자는 바로 입력할 수 있어야 한다.
+        setProfileSaved(false);
+        setIsEditingProfile(true);
+      }
     });
     return () => {
       cancelled = true;
@@ -812,11 +837,40 @@ export default function CheongbajiPage() {
       setActiveProfile(normalized);
       setIsSearching(false);
     }, 300);
+    // 주의: 여기서는 더 이상 서버에 자동 저장하지 않는다. [맞춤 정책 찾기]는
+    // 그때그때 입력값으로 검색만 해보는 버튼이고, 서버에 실제로 저장(=다음
+    // 로그인 때도 복원됨)하는 건 [저장] 버튼(handleSaveProfile)을 눌렀을
+    // 때만 일어난다 - 예전에는 검색할 때마다 자동으로 저장돼서, "내가 수정
+    // 중인 값"과 "실제로 저장된 값"을 구분할 방법이 없었다.
+  }
 
-    // 로그인한 상태라면 [맞춤 정책 찾기]를 누른 이 입력값을 저장해서,
-    // 다음에 로그인했을 때 입력폼/검색결과가 그대로 복원되게 한다.
-    if (session) {
-      saveUserProfile(session.user.id, draftProfile);
+  // [수정] 버튼: 저장된 프로필을 고칠 수 있게 입력폼을 잠금 해제한다.
+  function handleStartEditProfile() {
+    setIsEditingProfile(true);
+  }
+
+  // [취소] 버튼: 수정 중이던 내용을 버리고 마지막으로 저장된 값으로 되돌린다.
+  function handleCancelEditProfile() {
+    if (savedProfile) {
+      setDraftProfile(savedProfile);
+    }
+    setIsEditingProfile(false);
+  }
+
+  // [저장] 버튼: 지금 입력폼(draftProfile)을 서버에 실제로 저장하고 다시 잠근다.
+  async function handleSaveProfile() {
+    if (!session) return;
+    setIsSavingProfile(true);
+    try {
+      await saveUserProfile(session.user.id, draftProfile);
+      setSavedProfile(draftProfile);
+      setProfileSaved(true);
+      setIsEditingProfile(false);
+      // 저장 = 지금 입력값을 확정한다는 뜻이므로, 검색 결과도 함께 최신화한다
+      // (저장만 하고 [맞춤 정책 찾기]를 따로 안 눌러도 화면이 바로 반영됨).
+      setActiveProfile({ ...draftProfile, income: draftProfile.income * 10_000 });
+    } finally {
+      setIsSavingProfile(false);
     }
   }
 
@@ -896,6 +950,9 @@ export default function CheongbajiPage() {
     setScrappedIds(new Set());
     setDraftProfile(DEFAULT_DRAFT_PROFILE);
     setActiveProfile({ ...DEFAULT_DRAFT_PROFILE, income: DEFAULT_DRAFT_PROFILE.income * 10_000 });
+    setProfileSaved(false);
+    setIsEditingProfile(true);
+    setSavedProfile(null);
   }
 
   return (
@@ -973,9 +1030,21 @@ export default function CheongbajiPage() {
       <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
         {/* ============ 프로필 입력 영역 ============ */}
         <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
-          <h2 className="text-base font-semibold text-slate-900">내 프로필</h2>
+          <div className="flex items-center justify-between">
+            <h2 className="text-base font-semibold text-slate-900">내 프로필</h2>
+            {profileLocked && (
+              <span className="flex items-center gap-1 text-xs font-medium text-slate-400">
+                <Lock className="h-3.5 w-3.5" />
+                저장됨 · 수정하려면 [수정]을 눌러주세요
+              </span>
+            )}
+          </div>
 
-          <div className="mt-4 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+          <div
+            className={`mt-4 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4 ${
+              profileLocked ? 'opacity-60' : ''
+            }`}
+          >
             {/* 나이 */}
             <div>
               <label className="flex items-center gap-1.5 text-sm font-medium text-slate-700">
@@ -987,18 +1056,20 @@ export default function CheongbajiPage() {
                   min={14}
                   max={45}
                   value={draftProfile.age}
+                  disabled={profileLocked}
                   onChange={(e) =>
                     setDraftProfile((prev) => ({ ...prev, age: Number(e.target.value) }))
                   }
-                  className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 accent-indigo-600"
+                  className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-200 accent-indigo-600 disabled:cursor-not-allowed"
                 />
                 <input
                   type="number"
                   value={draftProfile.age}
+                  disabled={profileLocked}
                   onChange={(e) =>
                     setDraftProfile((prev) => ({ ...prev, age: Number(e.target.value) || 0 }))
                   }
-                  className="w-16 shrink-0 rounded-lg border border-slate-300 px-2 py-1 text-sm"
+                  className="w-16 shrink-0 rounded-lg border border-slate-300 px-2 py-1 text-sm disabled:bg-slate-50 disabled:text-slate-400"
                 />
                 <span className="shrink-0 text-sm text-slate-500">세</span>
               </div>
@@ -1012,8 +1083,9 @@ export default function CheongbajiPage() {
               </label>
               <select
                 value={draftProfile.region}
+                disabled={profileLocked}
                 onChange={(e) => setDraftProfile((prev) => ({ ...prev, region: e.target.value }))}
-                className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-50 disabled:text-slate-400"
               >
                 {REGION_OPTIONS.map((r) => (
                   <option key={r} value={r}>
@@ -1033,10 +1105,11 @@ export default function CheongbajiPage() {
                 type="number"
                 min={0}
                 value={draftProfile.income}
+                disabled={profileLocked}
                 onChange={(e) =>
                   setDraftProfile((prev) => ({ ...prev, income: Number(e.target.value) || 0 }))
                 }
-                className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-50 disabled:text-slate-400"
                 placeholder="예: 200"
               />
             </div>
@@ -1054,8 +1127,9 @@ export default function CheongbajiPage() {
                     <button
                       key={opt}
                       type="button"
+                      disabled={profileLocked}
                       onClick={() => setDraftProfile((prev) => ({ ...prev, employment_status: opt }))}
-                      className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                      className={`rounded-full border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed ${
                         active
                           ? 'border-indigo-600 bg-indigo-600 text-white'
                           : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
@@ -1070,7 +1144,7 @@ export default function CheongbajiPage() {
           </div>
 
           {/* 관심 분야 */}
-          <div className="mt-5">
+          <div className={`mt-5 ${profileLocked ? 'opacity-60' : ''}`}>
             <label className="flex items-center gap-1.5 text-sm font-medium text-slate-700">
               <Heart className="h-4 w-4 text-slate-400" />
               관심 분야 (복수 선택)
@@ -1082,7 +1156,9 @@ export default function CheongbajiPage() {
                 return (
                   <label
                     key={category}
-                    className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-2 text-sm transition ${
+                    className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm transition ${
+                      profileLocked ? 'cursor-not-allowed' : 'cursor-pointer'
+                    } ${
                       checked
                         ? 'border-indigo-600 bg-indigo-50 text-indigo-700'
                         : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
@@ -1091,6 +1167,7 @@ export default function CheongbajiPage() {
                     <input
                       type="checkbox"
                       checked={checked}
+                      disabled={profileLocked}
                       onChange={() => toggleInterest(category)}
                       className="hidden"
                     />
@@ -1102,18 +1179,67 @@ export default function CheongbajiPage() {
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={handleSearch}
-            disabled={isSearching}
-            className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60 sm:w-auto"
-          >
-            <Search className="h-4 w-4" />
-            {isSearching ? '찾는 중...' : '맞춤 정책 찾기'}
-          </button>
+          <div className="mt-5 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleSearch}
+              disabled={isSearching}
+              className="flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60"
+            >
+              <Search className="h-4 w-4" />
+              {isSearching ? '찾는 중...' : '맞춤 정책 찾기'}
+            </button>
+
+            {/* 저장: 로그인 상태에서 잠겨있지 않을 때(수정 중이거나, 아직 저장된
+                프로필이 없는 신규 사용자)만 보여준다. 눌러야만 실제로 서버에
+                저장된다 - [맞춤 정책 찾기]는 그때그때 미리보기일 뿐 더 이상
+                자동으로 저장하지 않는다. */}
+            {session && !profileLocked && (
+              <button
+                type="button"
+                onClick={handleSaveProfile}
+                disabled={isSavingProfile}
+                className="flex items-center justify-center gap-2 rounded-xl border border-indigo-600 px-4 py-3 text-sm font-semibold text-indigo-600 transition hover:bg-indigo-50 disabled:opacity-60"
+              >
+                <Save className="h-4 w-4" />
+                {isSavingProfile ? '저장 중...' : '저장'}
+              </button>
+            )}
+
+            {/* 취소: 저장된 값이 있는 상태에서 수정 중일 때만 - 되돌릴 대상이
+                있어야 의미가 있으므로 신규 사용자에게는 보이지 않는다. */}
+            {session && profileSaved && isEditingProfile && (
+              <button
+                type="button"
+                onClick={handleCancelEditProfile}
+                disabled={isSavingProfile}
+                className="flex items-center justify-center gap-2 rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-500 transition hover:bg-slate-50"
+              >
+                취소
+              </button>
+            )}
+
+            {/* 수정: 저장된 프로필이 잠겨있을 때만 - 눌러야 입력폼이 풀린다. */}
+            {profileLocked && (
+              <button
+                type="button"
+                onClick={handleStartEditProfile}
+                className="flex items-center justify-center gap-2 rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+              >
+                <Pencil className="h-4 w-4" />
+                수정
+              </button>
+            )}
+          </div>
+
           {!session && (
             <p className="mt-2 text-xs text-slate-400">
               로그인하면 이 프로필이 저장돼서, 다음에 와도 다시 입력할 필요 없어요.
+            </p>
+          )}
+          {session && !profileSaved && (
+            <p className="mt-2 text-xs text-slate-400">
+              [저장]을 눌러야 이 프로필이 서버에 저장돼요. 저장해두면 다음에 로그인했을 때도 그대로 불러올 수 있어요.
             </p>
           )}
         </section>
