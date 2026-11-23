@@ -710,18 +710,11 @@ export default function CheongbajiPage() {
   // 입력 중인 프로필 (컨트롤된 폼 state)
   const [draftProfile, setDraftProfile] = useState<RecommendationUser>(DEFAULT_DRAFT_PROFILE);
 
-  // 지금 고른 지역(region) 안에서 실제로 존재하는 구/군/시 목록 (정책 제목의
-  // '(OO구)' 표기에서 뽑아낸 target_district 기준). 지역을 바꾸면 자동으로
-  // 그 지역에 맞는 목록으로 다시 계산된다.
+  // 지금 고른 지역(region)의 구/군/시 전체 목록. 해당 구를 대상으로 하는
+  // 정책이 실제로 있는지와 무관하게, 행정구역 전체를 보여준다.
   const availableDistricts = useMemo(() => {
-    const set = new Set<string>();
-    for (const p of policies) {
-      if (p.target_region === draftProfile.region && p.target_district) {
-        set.add(p.target_district);
-      }
-    }
-    return [...set].sort();
-  }, [policies, draftProfile.region]);
+    return DISTRICT_CANDIDATES[draftProfile.region] ?? [];
+  }, [draftProfile.region]);
 
   // [맞춤 정책 찾기] 버튼을 눌렀을 때만 갱신되는 "적용된" 프로필
   const [activeProfile, setActiveProfile] = useState<RecommendationUser>({
