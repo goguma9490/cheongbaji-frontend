@@ -655,6 +655,9 @@ export default function CheongbajiPage() {
   // 결과 대시보드 상태
   const [sortOption, setSortOption] = useState<SortOption>('score');
 
+  // 정책명/기관명으로 검색 (대소문자 구분 없이, 앞뒤 공백 무시)
+  const [searchQuery, setSearchQuery] = useState('');
+
   // '추천 결과'(적합도 0점 숨김) / '전체 목록'(0점 포함 전체) 뷰 전환
   const [viewMode, setViewMode] = useState<ViewMode>('recommended');
 
@@ -764,6 +767,12 @@ export default function CheongbajiPage() {
     if (showOnlyScrapped) {
       list = list.filter((p) => scrappedIds.has(p.policy_id));
     }
+    const query = searchQuery.trim().toLowerCase();
+    if (query) {
+      list = list.filter(
+        (p) => p.title.toLowerCase().includes(query) || p.organization.toLowerCase().includes(query)
+      );
+    }
     const sorted = [...list];
     if (sortOption === 'score') {
       sorted.sort((a, b) => b.total_score - a.total_score);
@@ -780,7 +789,16 @@ export default function CheongbajiPage() {
       sorted.sort((a, b) => (b.support_amount ?? 0) - (a.support_amount ?? 0));
     }
     return sorted;
-  }, [recommended, activeProfile.interests, sortOption, today, viewMode, showOnlyScrapped, scrappedIds]);
+  }, [
+    recommended,
+    activeProfile.interests,
+    sortOption,
+    today,
+    viewMode,
+    showOnlyScrapped,
+    scrappedIds,
+    searchQuery,
+  ]);
 
   // 정책이 많을 때 전부 한 번에 렌더링하지 않고 "더보기" 버튼으로 끊어서 보여준다.
   const RESULTS_PAGE_SIZE = 10;
@@ -1272,6 +1290,30 @@ export default function CheongbajiPage() {
               체크박스를 두 번 두는 대신 정렬 옵션만 남긴다. */}
           <aside className="h-fit rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-900">
+              <Search className="h-4 w-4 text-slate-400" />
+              검색
+            </div>
+            <div className="relative mt-2">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="정책명, 기관명으로 검색"
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 pr-7 text-sm"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  aria-label="검색어 지우기"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+
+            <div className="mt-5 flex items-center gap-1.5 text-sm font-semibold text-slate-900">
               <SlidersHorizontal className="h-4 w-4 text-slate-400" />
               정렬
             </div>
@@ -1354,7 +1396,9 @@ export default function CheongbajiPage() {
 
             {displayedResults.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-500">
-                {showOnlyScrapped
+                {searchQuery.trim()
+                  ? `'${searchQuery.trim()}'에 대한 검색 결과가 없어요.`
+                  : showOnlyScrapped
                   ? '스크랩한 정책이 없어요. 정책 카드의 북마크 아이콘을 눌러 스크랩해보세요.'
                   : viewMode === 'recommended'
                   ? '조건에 맞는 정책이 없어요. 프로필을 조정하고 다시 찾아보세요.'
