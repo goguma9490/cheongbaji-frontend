@@ -396,13 +396,52 @@ function normalizeCategory(rawCategory: string | null | undefined, ...textParts:
 
 // 정책 제목 맨 앞의 '(영종구)', '(평택시)' 같은 괄호 표기에서 세부 구/군/시를
 // 뽑아낸다. 이게 붙은 정책은 그 지역 주민만 실제로 신청할 수 있는 경우가
-// 많아서(인천 쪽이 특히 많음 - 219건 중 99건), 시/도 단위(target_region)
-// 만으로는 '영종구 전용' 정책이 다른 구 주민에게도 추천되는 문제가 있었다.
+// 많다(인천 쪽이 특히 많음 - 219건 중 99건).
 const DISTRICT_PREFIX_RE = /^\(([가-힣]+(?:구|군|시))\)/;
 
-function extractDistrict(title: string): string | null {
+// 인천은 제목에 '(구명)'을 붙이는 관행이 있어서 위 접두어만으로 꽤 많이
+// 잡히지만, 서울/경기는 제목에는 구/시가 거의 안 붙고(인천처럼 편집하지
+// 않음) 대신 담당기관(institution)에 '서울특별시 은평구 ...', '경기도
+// 평택시 ...'처럼 구/시 이름이 들어있는 경우가 많다. 그래서 제목 접두어가
+// 없으면 지역별 후보 목록으로 institution 안에서 구/시/군 이름을 찾는다.
+const DISTRICT_CANDIDATES: Record<string, string[]> = {
+  인천: [
+    '중구', '동구', '미추홀구', '연수구', '남동구', '부평구', '계양구', '서구',
+    '강화군', '옹진군', '영종구', '서해구', '제물포구', '검단구',
+  ],
+  서울: [
+    '종로구', '중구', '용산구', '성동구', '광진구', '동대문구', '중랑구', '성북구',
+    '강북구', '도봉구', '노원구', '은평구', '서대문구', '마포구', '양천구', '강서구',
+    '구로구', '금천구', '영등포구', '동작구', '관악구', '서초구', '강남구', '송파구',
+    '강동구',
+  ],
+  경기: [
+    '수원시', '성남시', '의정부시', '안양시', '부천시', '광명시', '평택시', '동두천시',
+    '안산시', '고양시', '과천시', '구리시', '남양주시', '오산시', '시흥시', '군포시',
+    '의왕시', '하남시', '용인시', '파주시', '이천시', '안성시', '김포시', '화성시',
+    '광주시', '양주시', '포천시', '여주시', '연천군', '가평군', '양평군',
+  ],
+};
+
+function extractDistrict(title: string, institution: string, region: string | null): string | null {
   const m = DISTRICT_PREFIX_RE.exec(title.trim());
-  return m ? m[1] : null;
+  if (m) return m[1];
+
+  const candidates = region ? DISTRICT_CANDIDATES[region] : undefined;
+  if (!candidates || !institution) return null;
+  for (const name of candidates) {
+    if (institution.includes(name)) return name;
+  }
+  return null;
+}
+
+// institution에서만 찾아낸 구/시/군은(=제목에 원래 안 붙어있던 경우) 인천의
+// '(구명) 제목' 표기 방식과 통일해서 제목 맨 앞에 똑같이 붙여준다. 제목에
+// 이미 접두어가 있으면 중복으로 안 붙인다.
+function withDistrictPrefix(title: string, district: string | null): string {
+  if (!district) return title;
+  if (DISTRICT_PREFIX_RE.test(title.trim())) return title;
+  return `(${district}) ${title}`;
 }
 
 async function fetchPoliciesFromSupabase(): Promise<Policy[]> {
@@ -422,24 +461,27 @@ async function fetchPoliciesFromSupabase(): Promise<Policy[]> {
     list.push({ document_name: d.document_name, is_required: d.is_essential ?? true });
   }
 
-  return (policyRows ?? []).map((row: any) => ({
-    policy_id: row.policy_id,
-    title: row.title,
-    category: normalizeCategory(row.category, row.title, row.summary, row.benefit_desc),
-    organization: row.institution ?? '기관 정보 없음',
-    description: row.summary ?? '',
-    support_content: row.benefit_desc ?? row.summary ?? '',
-    min_age: row.min_age,
-    max_age: row.max_age,
-    target_region: row.target_region,
-    target_district: extractDistrict(row.title ?? ''),
-    max_income: row.max_income,
-    target_employment: row.target_employment,
-    support_amount: row.max_benefit_amount,
-    deadline: row.closing_date,
-    source_url: row.apply_url,
-    documents: docsByPolicy[row.policy_id] ?? [],
-  }));
+  return (policyRows ?? []).map((row: any) => {
+    const district = extractDistrict(row.title ?? '', row.institution ?? '', row.target_region);
+    return {
+      policy_id: row.policy_id,
+      title: withDistrictPrefix(row.title, district),
+      category: normalizeCategory(row.category, row.title, row.summary, row.benefit_desc),
+      organization: row.institution ?? '기관 정보 없음',
+      description: row.summary ?? '',
+      support_content: row.benefit_desc ?? row.summary ?? '',
+      min_age: row.min_age,
+      max_age: row.max_age,
+      target_region: row.target_region,
+      target_district: district,
+      max_income: row.max_income,
+      target_employment: row.target_employment,
+      support_amount: row.max_benefit_amount,
+      deadline: row.closing_date,
+      source_url: row.apply_url,
+      documents: docsByPolicy[row.policy_id] ?? [],
+    };
+  });
 }
 
 /* ============================================================
