@@ -483,6 +483,7 @@ function getEligibilityChips(policy: Policy): string[] {
  * ============================================================ */
 
 type SortOption = 'score' | 'deadline' | 'amount';
+type ViewMode = 'recommended' | 'all';
 
 export default function CheongbajiPage() {
   const today = useMemo(() => new Date(), []);
@@ -532,6 +533,9 @@ export default function CheongbajiPage() {
   // 결과 대시보드 상태
   const [sortOption, setSortOption] = useState<SortOption>('score');
 
+  // '추천 결과'(적합도 0점 숨김) / '전체 목록'(0점 포함 전체) 뷰 전환
+  const [viewMode, setViewMode] = useState<ViewMode>('recommended');
+
   // 상세 모달 상태
   const [selectedPolicy, setSelectedPolicy] = useState<RecommendedPolicy | null>(null);
   const [documentChecks, setDocumentChecks] = useState<Record<string, Set<string>>>({});
@@ -548,10 +552,18 @@ export default function CheongbajiPage() {
 
   // 결과 목록에 별도의 "관심 분야 필터"를 두지 않고, 프로필에서 고른 관심 분야를
   // 그대로 적용한다 (관심 분야를 하나도 고르지 않았다면 전체 카테고리를 보여준다).
+  //
+  // '추천 결과' 뷰: 적합도 0점짜리는 사실상 추천이라고 보기 어려워서 숨긴다.
+  // '전체 목록' 뷰: 0점짜리도 포함해서(관심 분야 필터도 끄고) 하드 필터를
+  // 통과한 정책을 전부 보여준다 - 적합도 0점이라 추천엔 안 뜨지만 조건상
+  // 신청은 가능한 정책을 찾아볼 수 있게 하기 위함.
   const displayedResults = useMemo(() => {
     let list = recommended;
-    if (activeProfile.interests.length > 0) {
-      list = list.filter((p) => activeProfile.interests.includes(p.category));
+    if (viewMode === 'recommended') {
+      list = list.filter((p) => p.total_score > 0);
+      if (activeProfile.interests.length > 0) {
+        list = list.filter((p) => activeProfile.interests.includes(p.category));
+      }
     }
     const sorted = [...list];
     if (sortOption === 'score') {
@@ -569,7 +581,7 @@ export default function CheongbajiPage() {
       sorted.sort((a, b) => (b.support_amount ?? 0) - (a.support_amount ?? 0));
     }
     return sorted;
-  }, [recommended, activeProfile.interests, sortOption, today]);
+  }, [recommended, activeProfile.interests, sortOption, today, viewMode]);
 
   // 시너지 추천 카드: '주거+일자리' 고정이 아니라, 내가 선택한 관심분야 중
   // 적합도가 가장 높은 서로 다른 카테고리 2개를 조합한다.
@@ -852,13 +864,49 @@ export default function CheongbajiPage() {
               {dataSource === 'supabase' && '실제 Supabase 데이터 기준'}
               {dataSource === 'dummy' && '예시(더미) 데이터 기준'}
             </p>
+
+            {/* 추천 결과(적합도 0점 숨김) / 전체 목록(0점 포함) 탭 전환 */}
+            <div className="mb-3 flex gap-1.5 rounded-xl bg-slate-100 p-1 text-sm font-medium">
+              <button
+                type="button"
+                onClick={() => setViewMode('recommended')}
+                className={`flex-1 rounded-lg px-3 py-1.5 transition ${
+                  viewMode === 'recommended'
+                    ? 'bg-white text-indigo-600 shadow-sm'
+                    : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                추천 결과
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('all')}
+                className={`flex-1 rounded-lg px-3 py-1.5 transition ${
+                  viewMode === 'all' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                전체 목록 ({recommended.length}건)
+              </button>
+            </div>
+
             <p className="mb-3 text-sm text-slate-500">
-              총 <span className="font-semibold text-slate-900">{displayedResults.length}개</span>의 맞춤 정책을 찾았어요.
+              {viewMode === 'recommended' ? (
+                <>
+                  총 <span className="font-semibold text-slate-900">{displayedResults.length}개</span>의 맞춤 정책을 찾았어요.
+                </>
+              ) : (
+                <>
+                  적합도 0점인 정책도 포함해서, 조건(나이·지역·소득·취업상태·마감일)에 맞는 정책을 전부
+                  보여드려요. 총 <span className="font-semibold text-slate-900">{displayedResults.length}개</span>.
+                </>
+              )}
             </p>
 
             {displayedResults.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-500">
-                조건에 맞는 정책이 없어요. 프로필을 조정하고 다시 찾아보세요.
+                {viewMode === 'recommended'
+                  ? '조건에 맞는 정책이 없어요. 프로필을 조정하고 다시 찾아보세요.'
+                  : '조건에 맞는 정책이 없어요. 프로필(나이·지역·소득·취업상태)을 조정해보세요.'}
               </div>
             ) : (
               <div className="space-y-3">
