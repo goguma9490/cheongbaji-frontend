@@ -85,7 +85,7 @@ interface RecommendedPolicy extends Policy {
  * 2. 추천 알고리즘 (getRecommendedPolicies.ts 와 동일한 로직)
  * ============================================================ */
 
-function passesHardFilter(user: RecommendationUser, policy: Policy): boolean {
+function passesHardFilter(user: RecommendationUser, policy: Policy, today: Date): boolean {
   const ageOk =
     (policy.min_age == null || user.age >= policy.min_age) &&
     (policy.max_age == null || user.age <= policy.max_age);
@@ -101,7 +101,12 @@ function passesHardFilter(user: RecommendationUser, policy: Policy): boolean {
     policy.target_employment === '전체' ||
     policy.target_employment === user.employment_status;
 
-  return ageOk && regionOk && incomeOk && employmentOk;
+  // ⚠️ 마감(deadline이 이미 지남) 정책은 더 이상 신청할 수 없으므로 추천 대상에서 제외.
+  // (deadline이 null이면 상시모집으로 간주해 통과시킨다)
+  const dday = getDday(policy.deadline, today);
+  const deadlineOk = dday === null || dday >= 0;
+
+  return ageOk && regionOk && incomeOk && employmentOk && deadlineOk;
 }
 
 function atMidnight(d: Date): Date {
@@ -160,7 +165,7 @@ function getRecommendedPolicies(
   policies: Policy[],
   today: Date = new Date()
 ): RecommendedPolicy[] {
-  const passed = policies.filter((p) => passesHardFilter(user, p));
+  const passed = policies.filter((p) => passesHardFilter(user, p, today));
   if (passed.length === 0) return [];
 
   const supportScores = computeSupportScores(passed);
@@ -437,6 +442,24 @@ function getDdayLabel(deadline: string | null, today: Date): { label: string; ur
   return { label: `D-${dday}`, urgent: dday <= 7 };
 }
 
+/* ⚠️ '지원 내용'(support_content)을 통째로 보여주던 것을, 공고문 원문에서 ○/□/■/◆
+ * 불릿이나 줄바꿈으로 나뉘는 첫 번째 항목(보통 '사업 내용'에 해당)만 한눈에 보이는
+ * 핵심 요약으로 우선 보여주고, 나머지 전체 내용은 '전체 내용 보기' 토글로 펼쳐 볼 수
+ * 있게 한다(정보를 숨기는 게 아니라 기본 노출 분량만 줄이는 것). */
+function summarizeSupportContent(text: string): string {
+  const trimmed = (text ?? '').trim();
+  if (!trimmed) return '';
+
+  const segments = trimmed
+    .split(/\r?\n|(?=[○□■◆])/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const first = segments[0] ?? trimmed;
+
+  const MAX_LEN = 60;
+  return first.length > MAX_LEN ? `${first.slice(0, MAX_LEN)}…` : first;
+}
+
 function getEligibilityChips(policy: Policy): string[] {
   const chips: string[] = [];
 
@@ -512,6 +535,11 @@ export default function CheongbajiPage() {
   // 상세 모달 상태
   const [selectedPolicy, setSelectedPolicy] = useState<RecommendedPolicy | null>(null);
   const [documentChecks, setDocumentChecks] = useState<Record<string, Set<string>>>({});
+  // '지원 내용' 요약 토글 상태 (정책을 바꿔서 열 때마다 다시 요약 상태로 초기화)
+  const [supportExpanded, setSupportExpanded] = useState(false);
+  useEffect(() => {
+    setSupportExpanded(false);
+  }, [selectedPolicy?.policy_id]);
 
   const recommended = useMemo(
     () => getRecommendedPolicies(activeProfile, policies, today),
@@ -918,7 +946,21 @@ export default function CheongbajiPage() {
               <div>
                 <p className="font-semibold text-slate-900">지원 내용</p>
                 {/* ⚠️ break-words 추가: 모달 안 긴 안내문도 고정폭 안에서 줄바꿈되도록 함 */}
-                <p className="mt-1 break-words text-slate-600">{selectedPolicy.support_content}</p>
+                <p className="mt-1 break-words text-slate-600">
+                  {supportExpanded
+                    ? selectedPolicy.support_content
+                    : summarizeSupportContent(selectedPolicy.support_content)}
+                </p>
+                {summarizeSupportContent(selectedPolicy.support_content) !==
+                  selectedPolicy.support_content.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => setSupportExpanded((prev) => !prev)}
+                    className="mt-1.5 text-xs font-semibold text-indigo-600 hover:underline"
+                  >
+                    {supportExpanded ? '간단히 보기' : '전체 내용 보기'}
+                  </button>
+                )}
               </div>
 
               <div>
