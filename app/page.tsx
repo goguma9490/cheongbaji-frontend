@@ -467,6 +467,60 @@ async function upsertUserChecklist(
   }
 }
 
+/* ============================================================
+ * 2-2. 로그인 사용자의 "프로필 입력값" 저장 (user_profile 테이블)
+ * ------------------------------------------------------------
+ * [맞춤 정책 찾기]를 누른 시점의 입력값(나이/지역/소득/취업상태/관심분야)을
+ * 저장해서, 로그인 상태로 다시 방문했을 때 입력폼과 검색결과가 그대로
+ * 복원되도록 한다. (로그아웃 상태에서는 기존처럼 기본값으로 시작)
+ * ============================================================ */
+
+async function fetchUserProfile(userId: string): Promise<RecommendationUser | null> {
+  const { data, error } = await supabase
+    .from('user_profile')
+    .select('age, region, income, employment_status, interests')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (error) {
+    console.error('프로필을 불러오지 못했습니다:', error);
+    return null;
+  }
+  if (!data) return null;
+  return {
+    age: data.age,
+    region: data.region,
+    income: data.income,
+    employment_status: data.employment_status,
+    interests: data.interests ?? [],
+  };
+}
+
+async function saveUserProfile(userId: string, profile: RecommendationUser) {
+  const { error } = await supabase.from('user_profile').upsert(
+    {
+      user_id: userId,
+      age: profile.age,
+      region: profile.region,
+      income: profile.income, // 프로필 입력폼과 동일하게 '만원' 단위로 저장 (activeProfile의 원 단위가 아님)
+      employment_status: profile.employment_status,
+      interests: profile.interests,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'user_id' }
+  );
+  if (error) {
+    console.error('프로필 저장에 실패했습니다:', error);
+  }
+}
+
+const DEFAULT_DRAFT_PROFILE: RecommendationUser = {
+  age: 27,
+  region: '서울',
+  income: 200, // 만원 단위로 입력받음 (활성 프로필에서는 *10000 하여 사용)
+  employment_status: '미취업자',
+  interests: ['일자리', '주거'],
+};
+
 const DUMMY_POLICIES = buildDummyPolicies();
 
 const REGION_OPTIONS = ['서울', '인천', '경기'];
@@ -576,18 +630,12 @@ export default function CheongbajiPage() {
   }, []);
 
   // 입력 중인 프로필 (컨트롤된 폼 state)
-  const [draftProfile, setDraftProfile] = useState<RecommendationUser>({
-    age: 27,
-    region: '서울',
-    income: 200, // 만원 단위로 입력받음 (아래에서 *10000 하여 사용)
-    employment_status: '미취업자',
-    interests: ['일자리', '주거'],
-  });
+  const [draftProfile, setDraftProfile] = useState<RecommendationUser>(DEFAULT_DRAFT_PROFILE);
 
   // [맞춤 정책 찾기] 버튼을 눌렀을 때만 갱신되는 "적용된" 프로필
   const [activeProfile, setActiveProfile] = useState<RecommendationUser>({
-    ...draftProfile,
-    income: draftProfile.income * 10_000,
+    ...DEFAULT_DRAFT_PROFILE,
+    income: DEFAULT_DRAFT_PROFILE.income * 10_000,
   });
   const [isSearching, setIsSearching] = useState(false);
 
@@ -646,6 +694,22 @@ export default function CheongbajiPage() {
       }
       setDocumentChecks(nextChecks);
       setScrappedIds(nextScrapped);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [session]);
+
+  // ---- 저장된 프로필 복원 ----
+  // 로그인하면 마지막으로 [맞춤 정책 찾기]를 눌렀을 때의 입력값을 불러와서
+  // 입력폼(draftProfile)과 검색결과(activeProfile)를 둘 다 복원한다.
+  useEffect(() => {
+    if (!session) return;
+    let cancelled = false;
+    fetchUserProfile(session.user.id).then((saved) => {
+      if (cancelled || !saved) return;
+      setDraftProfile(saved);
+      setActiveProfile({ ...saved, income: saved.income * 10_000 });
     });
     return () => {
       cancelled = true;
@@ -748,6 +812,12 @@ export default function CheongbajiPage() {
       setActiveProfile(normalized);
       setIsSearching(false);
     }, 300);
+
+    // 로그인한 상태라면 [맞춤 정책 찾기]를 누른 이 입력값을 저장해서,
+    // 다음에 로그인했을 때 입력폼/검색결과가 그대로 복원되게 한다.
+    if (session) {
+      saveUserProfile(session.user.id, draftProfile);
+    }
   }
 
   function toggleInterest(category: string) {
@@ -819,10 +889,13 @@ export default function CheongbajiPage() {
 
   async function handleLogout() {
     await supabase.auth.signOut();
-    // 로그아웃하면 이 기기에만 남아있던 스크랩/체크 상태도 함께 비운다
-    // (다음 로그인 시 서버에 저장된 값으로 다시 채워짐).
+    // 로그아웃하면 이 기기에만 남아있던 스크랩/체크/프로필 상태도 함께 비운다
+    // (다음 로그인 시 서버에 저장된 값으로 다시 채워짐 - 공용 기기에서 이전
+    // 계정의 입력값이 남아있지 않도록).
     setDocumentChecks({});
     setScrappedIds(new Set());
+    setDraftProfile(DEFAULT_DRAFT_PROFILE);
+    setActiveProfile({ ...DEFAULT_DRAFT_PROFILE, income: DEFAULT_DRAFT_PROFILE.income * 10_000 });
   }
 
   return (
@@ -1038,6 +1111,11 @@ export default function CheongbajiPage() {
             <Search className="h-4 w-4" />
             {isSearching ? '찾는 중...' : '맞춤 정책 찾기'}
           </button>
+          {!session && (
+            <p className="mt-2 text-xs text-slate-400">
+              로그인하면 이 프로필이 저장돼서, 다음에 와도 다시 입력할 필요 없어요.
+            </p>
+          )}
         </section>
 
         {/* ============ 결과 대시보드 ============ */}
